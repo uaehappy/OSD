@@ -2,50 +2,54 @@ from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import argparse
 
-def render_char_with_outline_i4_preserve_aspect(char, font_path, out_size, font_scale=1.0, outline_width=1):
+def render_char_with_outline_i4_preserve_aspect(char, font_path, out_size, font_scale=1.3, outline_width=2):
     w, h = out_size
     font_size = int(min(w, h) * font_scale)
     font = ImageFont.truetype(font_path, font_size)
 
+    # 创建大画布（避免字符边缘被裁剪）
     canvas_size = (w * 4, h * 4)
     img = Image.new("L", canvas_size, 0)
     draw = ImageDraw.Draw(img)
 
-    # ❗ 不传 stroke_width，防止 bbox 扩大
+    # 获取字符边界
     bbox = draw.textbbox((0, 0), char, font=font)
     text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     text_x, text_y = bbox[0], bbox[1]
 
+    # 居中位置（根据 bbox 偏移修正）
     center_x = (canvas_size[0] - text_w) // 2 - text_x
     center_y = (canvas_size[1] - text_h) // 2 - text_y
 
-    if outline_width > 0:
-        for dx in range(-outline_width, outline_width + 1):
-            for dy in range(-outline_width, outline_width + 1):
-                if dx * dx + dy * dy <= outline_width * outline_width:
-                    draw.text((center_x + dx, center_y + dy), char, font=font, fill=0x55)
+    # 描边（灰色）
+    for dx in range(-outline_width, outline_width + 1):
+        for dy in range(-outline_width, outline_width + 1):
+            if dx * dx + dy * dy <= outline_width * outline_width:
+                draw.text((center_x + dx, center_y + dy), char, font=font, fill=0x88)
 
+    # 主体（白色）
     draw.text((center_x, center_y), char, font=font, fill=0xFF)
 
+    # 剪裁字符区域
     cropped = img.crop(img.getbbox())
+
+    # 保持比例缩放，并居中粘贴到目标尺寸图像
     char_w, char_h = cropped.size
-
-    # 防止细字符被无限放大
-    scale = min(w / max(1, char_w), h / max(1, char_h))
-    new_size = (max(1, int(char_w * scale)), max(1, int(char_h * scale)))
-
+    scale = min(w / char_w, h / char_h)
+    new_size = (int(char_w * scale), int(char_h * scale))
     resized = cropped.resize(new_size, Image.NEAREST)
 
     final_img = Image.new("L", (w, h), 0)
     offset = ((w - new_size[0]) // 2, (h - new_size[1]) // 2)
     final_img.paste(resized, offset)
 
+    # 转为 numpy 并量化为 I4（0x0, 0x8, 0xF）
     arr = np.array(final_img)
 
     def quantize(val):
         if val >= 200:
             return 0xF
-        elif val >= 100:
+        elif val >= 80:
             return 0x8
         else:
             return 0x0
