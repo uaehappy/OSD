@@ -98,9 +98,7 @@ def find_max_font_size(font_path, canvas_size, outline_width, var_coords=None, m
             high = mid - 1
     return best
 
-def render_char_precise_position_with_clean_outline(
-    char, font_path, out_size, font_pixel_size=None, outline_width=1, var_coords=None
-):
+def render_char_precise_position_with_clean_outline(char, font_path, out_size, font_pixel_size=None, outline_width=1, var_coords=None):
     w, h = out_size
     font_pixel_size = font_pixel_size or h
 
@@ -117,31 +115,39 @@ def render_char_precise_position_with_clean_outline(
     bitmap = glyph.bitmap
 
     bitmap_w, bitmap_h = bitmap.width, bitmap.rows
+    bitmap_left = glyph.bitmap_left
+    bitmap_top = glyph.bitmap_top
 
-    pad = outline_width + 2
+    pad = outline_width + 3
     padded_w = w + pad * 2
     padded_h = h + pad * 2
     canvas = np.zeros((padded_h, padded_w), dtype=np.uint8)
 
-    # 取字体度量，单位26.6格式，右移6位转像素
-    ascender = face.size.ascender >> 6
-    descender = face.size.descender >> 6
-    font_height = ascender - descender  # 理论字体高度
-
     if bitmap_w > 0 and bitmap_h > 0:
         arr = np.array(bitmap.buffer, dtype=np.uint8).reshape(bitmap_h, bitmap_w)
 
-        # glyph.bitmap_top 是字形顶部距离基线的像素数
-        # 计算基线在画布中y坐标，保证字体整体垂直居中
-        baseline_y = pad + (padded_h - 2*pad - font_height) // 2 + ascender
-
-        # 计算bitmap左上角y坐标（基线y - bitmap_top）
-        y = baseline_y - glyph.bitmap_top
-        y = max(0, min(y, padded_h - bitmap_h))
-
         # 水平居中
-        x = (padded_w - bitmap_w) // 2
-        x = max(0, min(x, padded_w - bitmap_w))
+        if char in ('-', ':'):
+            # 方案B：简单基于bitmap宽度的中心
+            canvas_center_x = padded_w / 2
+            offset_x = int(round(canvas_center_x - bitmap_w / 2))
+        else:
+            # 其他字符：基于bitmap_left + bitmap宽度/2的视觉中心
+            glyph_center_x = bitmap_left + bitmap_w / 2
+            canvas_center_x = padded_w / 2
+            offset_x = int(round(canvas_center_x - glyph_center_x))
+
+        # 垂直居中，'-'和':'特殊处理
+        if char in ('-', ':'):
+            canvas_center_y = padded_h / 2
+            offset_y = int(round(canvas_center_y - bitmap_h / 2))
+        else:
+            glyph_center_y = bitmap_top - bitmap_h / 2
+            canvas_center_y = padded_h / 2
+            offset_y = int(round(canvas_center_y - glyph_center_y))
+
+        x = max(0, min(offset_x, padded_w - bitmap_w))
+        y = max(0, min(offset_y, padded_h - bitmap_h))
 
         canvas[y:y + bitmap_h, x:x + bitmap_w] = arr
 
@@ -152,18 +158,25 @@ def render_char_precise_position_with_clean_outline(
         dilated = mask.copy()
 
     outline_mask = np.logical_and(dilated, np.logical_not(mask))
-    result = np.zeros_like(canvas, dtype=np.uint8)
-    result[outline_mask] = 180
-    result[mask] = 255
 
-    # 裁剪回目标大小
-    final_arr = result[pad:pad + h, pad:pad + w]
+    result = np.zeros_like(canvas, dtype=np.uint8)
+    result[outline_mask] = 136  # 灰色描边
+    result[mask] = 255          # 白色字体
+
+    # 裁剪回目标大小，基于pad居中
+    start_y = (padded_h - h) // 2
+    start_x = (padded_w - w) // 2
+    final_arr = result[start_y:start_y + h, start_x:start_x + w]
+
+    def quantize(val):
+        return 0xF if val >= 200 else 0x8 if val >= 100 else 0x0
 
     flat = final_arr.flatten()
     quantized = np.array([quantize(p) for p in flat], dtype=np.uint8)
     if len(quantized) % 2 != 0:
         quantized = np.append(quantized, 0)
     packed = [(quantized[i] << 4) | quantized[i + 1] for i in range(0, len(quantized), 2)]
+
     return packed
 
 def export_chars_black_white_gray_i4_header(chars, font_path, out_size, outline_width=1, auto_font_size=True, var_coords=None):
