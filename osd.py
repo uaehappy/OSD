@@ -123,32 +123,26 @@ def render_char_precise_position_with_clean_outline(
     padded_h = h + pad * 2
     canvas = np.zeros((padded_h, padded_w), dtype=np.uint8)
 
+    # 取字体度量，单位26.6格式，右移6位转像素
+    ascender = face.size.ascender >> 6
+    descender = face.size.descender >> 6
+    font_height = ascender - descender  # 理论字体高度
+
     if bitmap_w > 0 and bitmap_h > 0:
         arr = np.array(bitmap.buffer, dtype=np.uint8).reshape(bitmap_h, bitmap_w)
-        mask = arr > 10
-        rows = np.any(mask, axis=1)
-        cols = np.any(mask, axis=0)
-        top_bbox = np.argmax(rows)
-        bottom_bbox = len(rows) - 1 - np.argmax(rows[::-1])
-        left_bbox = np.argmax(cols)
-        right_bbox = len(cols) - 1 - np.argmax(cols[::-1])
-        glyph_bbox_w = right_bbox - left_bbox + 1
-        glyph_bbox_h = bottom_bbox - top_bbox + 1
-        canvas_center_x = padded_w / 2
-        canvas_center_y = padded_h / 2
-        glyph_center_x = left_bbox + glyph_bbox_w / 2
-        glyph_center_y = top_bbox + glyph_bbox_h / 2
 
-        offset_x = int(round(canvas_center_x - glyph_center_x))
-        offset_y = int(round(canvas_center_y - glyph_center_y))
+        # glyph.bitmap_top 是字形顶部距离基线的像素数
+        # 计算基线在画布中y坐标，保证字体整体垂直居中
+        baseline_y = pad + (padded_h - 2*pad - font_height) // 2 + ascender
 
-        # 修正字符垂直位置问题，- 和 : 等保持垂直居中
-        if w <= 10 and h <= 20:
-            if char not in "-:.,'\"`|!()[]{}":
-                offset_y = pad  # 其他小字符贴顶对齐
+        # 计算bitmap左上角y坐标（基线y - bitmap_top）
+        y = baseline_y - glyph.bitmap_top
+        y = max(0, min(y, padded_h - bitmap_h))
 
-        x = max(0, min(offset_x, padded_w - bitmap_w))
-        y = max(0, min(offset_y, padded_h - bitmap_h))
+        # 水平居中
+        x = (padded_w - bitmap_w) // 2
+        x = max(0, min(x, padded_w - bitmap_w))
+
         canvas[y:y + bitmap_h, x:x + bitmap_w] = arr
 
     mask = canvas > 10
@@ -162,9 +156,8 @@ def render_char_precise_position_with_clean_outline(
     result[outline_mask] = 180
     result[mask] = 255
 
-    start_y = (padded_h - h) // 2
-    start_x = (padded_w - w) // 2
-    final_arr = result[start_y:start_y + h, start_x:start_x + w]
+    # 裁剪回目标大小
+    final_arr = result[pad:pad + h, pad:pad + w]
 
     flat = final_arr.flatten()
     quantized = np.array([quantize(p) for p in flat], dtype=np.uint8)
