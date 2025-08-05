@@ -7,7 +7,7 @@
 - 量化灰度更细腻，描边更清晰
 - 建议配合 Variable Font（如 RobotoFlex-VariableFont.ttf）
 """
-
+from scipy.ndimage import binary_dilation
 from PIL import Image, ImageDraw
 import numpy as np
 import freetype
@@ -44,17 +44,6 @@ def find_best_var_coords(font_path, canvas_size, outline_width, font_pixel_size,
         return sorted(results, key=lambda x: -x[1])[0][0]
     return None
 
-def simple_dilate_no_wrap(mask, iterations=1):
-    # 3x3 膨胀，支持多轮
-    for _ in range(iterations):
-        padded = np.pad(mask, pad_width=1, mode='constant', constant_values=0)
-        new_mask = mask.copy()
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                if dx == 0 and dy == 0: continue
-                new_mask = np.logical_or(new_mask, padded[1+dy:1+dy+mask.shape[0], 1+dx:1+dx+mask.shape[1]])
-        mask = new_mask
-    return mask
 
 def quantize(val):
     # 更细致的灰度分级
@@ -98,9 +87,21 @@ def find_max_font_size(font_path, canvas_size, outline_width, var_coords=None, m
             high = mid - 1
     return best
 
-def render_char_precise_position_with_clean_outline(char, font_path, out_size, font_pixel_size=None, outline_width=1, var_coords=None):
+def simple_dilate_no_wrap(mask, width):
+    """对 mask 进行 dilation，不 wrap，不使用卷积核边缘重复"""
+    structure = np.ones((width * 2 + 1, width * 2 + 1), dtype=bool)
+    return binary_dilation(mask, structure=structure)
+
+def render_char_precise_position_with_clean_outline(
+    char,
+    font_path,
+    out_size,
+    font_pixel_size=None,
+    outline_width=1,
+    var_coords=None
+):
     w, h = out_size
-    font_pixel_size = font_pixel_size or h
+    canvas = np.zeros((h, w), dtype=np.uint8)
 
     face = freetype.Face(font_path)
     if var_coords is not None:
@@ -118,81 +119,68 @@ def render_char_precise_position_with_clean_outline(char, font_path, out_size, f
     bitmap_left = glyph.bitmap_left
     bitmap_top = glyph.bitmap_top
 
-    pad = outline_width + 3
-    padded_w = w + pad * 2
-    padded_h = h + pad * 2
-    canvas = np.zeros((padded_h, padded_w), dtype=np.uint8)
+    arr = np.array(bitmap.buffer, dtype=np.uint8).reshape(bitmap_h, bitmap_w)
 
-    if bitmap_w > 0 and bitmap_h > 0:
-        arr = np.array(bitmap.buffer, dtype=np.uint8).reshape(bitmap_h, bitmap_w)
+    # 字形 advance.x 单位为 1/64 像素，转换为像素单位
+    advance_px = glyph.advance.x / 64
 
-        # 水平居中
-        if char in ('-', ':'):
-            # 方案B：简单基于bitmap宽度的中心
-            canvas_center_x = padded_w / 2
-            offset_x = int(round(canvas_center_x - bitmap_w / 2))
-        else:
-            # 其他字符：基于bitmap_left + bitmap宽度/2的视觉中心
-            glyph_center_x = bitmap_left + bitmap_w / 2
-            canvas_center_x = padded_w / 2
-            offset_x = int(round(canvas_center_x - glyph_center_x))
+    # 水平居中处理
+    if char in ('-', ':'):
+        # 针对窄符号，直接按位图宽度居中
+        offset_x = int(round((w - bitmap_w) / 2))
+    else:
+        # 以字形 advance 宽度为设计宽度居中，bitmap_left 是位图左边距，需加上
+        canvas_center_x = w / 2
+        glyph_center_x = advance_px / 2
+        offset_x = int(round(canvas_center_x - glyph_center_x)) + bitmap_left
 
-        # 垂直居中，'-'和':'特殊处理
-        if char in ('-', ':'):
-            canvas_center_y = padded_h / 2
-            offset_y = int(round(canvas_center_y - bitmap_h / 2))
-        else:
-            glyph_center_y = bitmap_top - bitmap_h / 2
-            canvas_center_y = padded_h / 2
-            offset_y = int(round(canvas_center_y - glyph_center_y))
+    # 限制偏移范围，避免越界
+    offset_x = max(0, min(offset_x, w - bitmap_w))
 
-        x = max(0, min(offset_x, padded_w - bitmap_w))
-        y = max(0, min(offset_y, padded_h - bitmap_h))
+    # 垂直居中，基于 bitmap_top 和 bitmap 高度定位字符垂直中心于画布中心
+    if char in ('-', ':'):
+        canvas_center_y = h / 2
+        offset_y = int(round(canvas_center_y - bitmap_h / 2))
+    else:
+        glyph_center_y = bitmap_top - bitmap_h / 2
+        canvas_center_y = h / 2
+        offset_y = int(round(canvas_center_y - glyph_center_y))
+        offset_y = max(0, min(offset_y, h - bitmap_h))
 
-        canvas[y:y + bitmap_h, x:x + bitmap_w] = arr
+    # 将字形灰度拷贝到画布
+    canvas[offset_y:offset_y + bitmap_h, offset_x:offset_x + bitmap_w] = arr
 
+    # 生成 mask 与描边
     mask = canvas > 10
     if outline_width > 0:
         dilated = simple_dilate_no_wrap(mask, outline_width)
     else:
         dilated = mask.copy()
-
     outline_mask = np.logical_and(dilated, np.logical_not(mask))
 
     result = np.zeros_like(canvas, dtype=np.uint8)
     result[outline_mask] = 136  # 灰色描边
     result[mask] = 255          # 白色字体
 
-    # 裁剪回目标大小，基于pad居中
-    start_y = (padded_h - h) // 2
-    start_x = (padded_w - w) // 2
-    final_arr = result[start_y:start_y + h, start_x:start_x + w]
-
+    # 量化为 4-bit (I4)
     def quantize(val):
         return 0xF if val >= 200 else 0x8 if val >= 100 else 0x0
 
-    flat = final_arr.flatten()
+    flat = result.flatten()
     quantized = np.array([quantize(p) for p in flat], dtype=np.uint8)
     if len(quantized) % 2 != 0:
         quantized = np.append(quantized, 0)
-    packed = [(quantized[i] << 4) | quantized[i + 1] for i in range(0, len(quantized), 2)]
 
+    packed = [(quantized[i] << 4) | quantized[i + 1] for i in range(0, len(quantized), 2)]
     return packed
 
-def export_chars_black_white_gray_i4_header(chars, font_path, out_size, outline_width=1, auto_font_size=True, var_coords=None):
+def export_chars_black_white_gray_i4_header(chars, font_path, out_size, outline_width=1, font_pixel_size=None, var_coords=None):
     w, h = out_size
-    font_pixel_size = None
-    if auto_font_size:
+
+    if font_pixel_size is None:
         print("🔍 Searching max font pixel size to fit canvas and outline...")
         font_pixel_size = find_max_font_size(font_path, out_size, outline_width, var_coords=var_coords)
         print(f"✅ Max font_pixel_size found: {font_pixel_size}")
-    else:
-        font_pixel_size = h
-
-    if var_coords is None:
-        print(f"🔍 自动搜索最佳变量字体轴参数（宽度和粗细）...")
-        var_coords = find_best_var_coords(font_path, out_size, outline_width, font_pixel_size)
-        print(f"✅ 找到最佳变量字体轴参数: {var_coords}")
 
     var_suffix = ""
 
@@ -338,7 +326,7 @@ if __name__ == "__main__":
             args.font,
             (args.width, args.height),
             outline_width=args.outline_width,
-            auto_font_size=False,
+            font_pixel_size=font_pixel_size,
             var_coords=var_coords
         )
         suffix = ""
