@@ -1,0 +1,14 @@
+prefix=/home_a/jszhang/freetype-2.9/install
+exec_prefix=/home_a/jszhang/freetype-2.9/install
+libdir=/home_a/jszhang/freetype-2.9/install/lib
+includedir=/home_a/jszhang/freetype-2.9/install/include
+
+Name: FreeType 2
+URL: https://freetype.org
+Description: A free, high-quality, and portable font engine.
+Version: 22.0.16
+Requires:
+Requires.private: zlib, libpng
+Libs: -L${libdir} -lfreetype
+Libs.private: 
+Cflags: -I${includedir}/freetype2
